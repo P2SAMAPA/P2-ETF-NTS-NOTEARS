@@ -1,4 +1,3 @@
-# ==================== File: lbfgsb_scipy.py ====================
 """
 L‑BFGS‑B optimizer wrapper for PyTorch.
 """
@@ -12,21 +11,41 @@ class LBFGSBScipy:
         self.bounds = None
 
     def assign_bounds(self, model):
-        """Assign bounds from model's convolutional layers."""
+        """Assign bounds for all trainable parameters of the NTS_NOTEARS model."""
         bounds = []
-        # Instantaneous bounds for pos and neg conv layers
-        if hasattr(model.conv1d_pos, 'instantaneous_bounds'):
-            bounds.extend(model.conv1d_pos.instantaneous_bounds)
-        if hasattr(model.conv1d_neg, 'instantaneous_bounds'):
-            bounds.extend(model.conv1d_neg.instantaneous_bounds)
-        # Lag bounds (flattened)
-        for bound_list in [model.conv1d_pos.lag_bounds_lists, model.conv1d_neg.lag_bounds_lists]:
-            for var_bounds in bound_list:
-                bounds.extend(var_bounds)
-        # FC2 layers are unconstrained
-        for _ in model.fc2.parameters():
-            bounds.append((None, None))
+
+        # Helper to add (None, None) for any remaining parameters (e.g., biases)
+        def add_unbounded(count):
+            for _ in range(count):
+                bounds.append((None, None))
+
+        # 1. Convolutional layers: pos and neg
+        for conv in [model.conv1d_pos, model.conv1d_neg]:
+            # Instantaneous bounds (kernel_size index = n_lags)
+            if hasattr(conv, 'instantaneous_bounds'):
+                bounds.extend(conv.instantaneous_bounds)
+            # Lag bounds (list of lists)
+            if hasattr(conv, 'lag_bounds_lists'):
+                for var_bounds in conv.lag_bounds_lists:
+                    bounds.extend(var_bounds)
+            # Bias terms (if any) are unconstrained
+            if conv.bias is not None:
+                add_unbounded(conv.bias.numel())
+
+        # 2. LocallyConnected layers (fc2)
+        for fc in model.fc2:
+            # weight
+            bounds.extend([(None, None)] * fc.weight.numel())
+            # bias (if present)
+            if fc.bias is not None:
+                bounds.extend([(None, None)] * fc.bias.numel())
+
         self.bounds = bounds
+
+        # Sanity check
+        total_params = sum(p.numel() for p in self.params)
+        if len(self.bounds) != total_params:
+            raise ValueError(f"Bounds length {len(self.bounds)} does not match parameter count {total_params}")
 
     def step(self, closure):
         def scipy_objective(x):
