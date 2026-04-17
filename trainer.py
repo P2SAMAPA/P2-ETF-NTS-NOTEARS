@@ -113,7 +113,7 @@ def train_global(universe: str, returns: pd.DataFrame) -> dict:
     with torch.no_grad():
         X_test_t = reshape_for_model_forward(X_test, model, device=config.DEVICE)
         pred = model(X_test_t).cpu().numpy()
-    last_pred = pred[-1]  # prediction for next day
+    last_pred = pred[-1]
     top_idx = np.argmax(last_pred)
     top_etf = tickers[top_idx]
     pred_return = float(last_pred[top_idx])
@@ -149,13 +149,19 @@ def train_adaptive(universe: str, returns: pd.DataFrame) -> dict:
         print(f"  Insufficient training days ({len(train_ret)}). Falling back to global.")
         return train_global(universe, returns)
 
+    # Create a validation set from the tail of the training data (20%)
+    val_size = max(10, int(len(train_ret) * 0.2))
+    train_ret_inner = train_ret.iloc[:-val_size]
+    val_ret_inner   = train_ret.iloc[-val_size:]
+
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(train_ret.values)
+    X_train = scaler.fit_transform(train_ret_inner.values)
+    X_val   = scaler.transform(val_ret_inner.values)
     X_test  = scaler.transform(test_ret.values) if len(test_ret) > 0 else X_train
 
     model = train_nts_notears(
-        X_train, X_train[-len(train_ret)//5:] or X_train[-10:],
-        n_lags=config.N_LAGS, lambda1=config.LAMBDA1, lambda2=config.LAMBDA2,
+        X_train, X_val, n_lags=config.N_LAGS,
+        lambda1=config.LAMBDA1, lambda2=config.LAMBDA2,
         w_threshold=config.W_THRESHOLD, max_iter=config.MAX_ITER,
         h_tol=config.H_TOL, rho_max=config.RHO_MAX, device=config.DEVICE
     )
