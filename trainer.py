@@ -1,4 +1,3 @@
-# ==================== File: trainer.py ====================
 """
 Training orchestration for NTS‑NOTEARS (Global and Adaptive Window).
 """
@@ -26,8 +25,8 @@ def train_nts_notears(X_train, X_val, n_lags, lambda1, lambda2, w_threshold, max
     dims = [d] + config.HIDDEN_DIMS + [1]
     model = NTS_NOTEARS(dims, n_lags=n_lags).to(device)
 
-    X_train_t = reshape_for_model_forward(X_train, model)
-    X_val_t   = reshape_for_model_forward(X_val, model)
+    X_train_t = reshape_for_model_forward(X_train, model, device=device)
+    X_val_t   = reshape_for_model_forward(X_val, model, device=device)
 
     rho, alpha, h = 1.0, 0.0, np.inf
     for iteration in range(max_iter):
@@ -37,7 +36,7 @@ def train_nts_notears(X_train, X_val, n_lags, lambda1, lambda2, w_threshold, max
             def closure():
                 optimizer.zero_grad()
                 X_hat = model(X_train_t)
-                loss = squared_loss(X_hat, X_train[model.simultaneous_idx:])
+                loss = squared_loss(X_hat, torch.tensor(X_train[model.simultaneous_idx:], dtype=torch.float32, device=device))
                 h_val = model.h_func()
                 penalty = 0.5 * rho * h_val * h_val + alpha * h_val
                 l2_reg = 0.5 * lambda2 * model.l2_reg()
@@ -112,14 +111,15 @@ def train_global(universe: str, returns: pd.DataFrame) -> dict:
     # Predict next‑day returns on test set
     model.eval()
     with torch.no_grad():
-        X_test_t = reshape_for_model_forward(X_test, model)
-        pred = model(X_test_t).numpy()
+        X_test_t = reshape_for_model_forward(X_test, model, device=config.DEVICE)
+        pred = model(X_test_t).cpu().numpy()
     last_pred = pred[-1]  # prediction for next day
     top_idx = np.argmax(last_pred)
     top_etf = tickers[top_idx]
-    pred_return = last_pred[top_idx]
+    pred_return = float(last_pred[top_idx])
 
     metrics = evaluate_etf(top_etf, test_ret)
+    print(f"  Selected ETF: {top_etf}, Predicted Return: {pred_return*100:.2f}%")
     return {
         "ticker": top_etf,
         "pred_return": pred_return,
@@ -132,6 +132,9 @@ def train_global(universe: str, returns: pd.DataFrame) -> dict:
 def train_adaptive(universe: str, returns: pd.DataFrame) -> dict:
     print(f"\n--- Adaptive Training: {universe} ---")
     tickers = [col.replace("_ret", "") for col in returns.columns]
+    if returns.empty:
+        return {"ticker": None, "pred_return": None, "metrics": {}, "change_point_date": None, "lookback_days": 0}
+
     cp_date = universe_adaptive_start_date(returns)
     print(f"  Adaptive window starts: {cp_date.date()}")
 
@@ -143,6 +146,7 @@ def train_adaptive(universe: str, returns: pd.DataFrame) -> dict:
     test_ret  = returns.loc[returns.index > end_date]
 
     if len(train_ret) < config.MIN_TRAIN_DAYS:
+        print(f"  Insufficient training days ({len(train_ret)}). Falling back to global.")
         return train_global(universe, returns)
 
     scaler = StandardScaler()
@@ -150,7 +154,7 @@ def train_adaptive(universe: str, returns: pd.DataFrame) -> dict:
     X_test  = scaler.transform(test_ret.values) if len(test_ret) > 0 else X_train
 
     model = train_nts_notears(
-        X_train, X_train[-len(train_ret)//5:],
+        X_train, X_train[-len(train_ret)//5:] or X_train[-10:],
         n_lags=config.N_LAGS, lambda1=config.LAMBDA1, lambda2=config.LAMBDA2,
         w_threshold=config.W_THRESHOLD, max_iter=config.MAX_ITER,
         h_tol=config.H_TOL, rho_max=config.RHO_MAX, device=config.DEVICE
@@ -158,18 +162,22 @@ def train_adaptive(universe: str, returns: pd.DataFrame) -> dict:
 
     model.eval()
     with torch.no_grad():
-        X_test_t = reshape_for_model_forward(X_test, model)
-        pred = model(X_test_t).numpy()
+        X_test_t = reshape_for_model_forward(X_test, model, device=config.DEVICE)
+        pred = model(X_test_t).cpu().numpy()
     last_pred = pred[-1] if len(pred) > 0 else np.zeros(len(tickers))
     top_idx = np.argmax(last_pred)
     top_etf = tickers[top_idx]
-    pred_return = last_pred[top_idx]
+    pred_return = float(last_pred[top_idx])
 
-    metrics = evaluate_etf(top_etf, test_ret)
+    metrics = evaluate_etf(top_etf, test_ret) if len(test_ret) > 0 else {}
     lookback = (returns.index[-1] - cp_date).days
+    print(f"  Selected ETF: {top_etf}, Predicted Return: {pred_return*100:.2f}%")
     return {
-        "ticker": top_etf, "pred_return": pred_return, "metrics": metrics,
-        "change_point_date": cp_date.strftime("%Y-%m-%d"), "lookback_days": lookback,
+        "ticker": top_etf,
+        "pred_return": pred_return,
+        "metrics": metrics,
+        "change_point_date": cp_date.strftime("%Y-%m-%d"),
+        "lookback_days": lookback,
         "test_start": test_ret.index[0].strftime("%Y-%m-%d") if len(test_ret) else "",
         "test_end": test_ret.index[-1].strftime("%Y-%m-%d") if len(test_ret) else "",
     }
