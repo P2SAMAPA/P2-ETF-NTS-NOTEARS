@@ -119,12 +119,13 @@ class NTS_NOTEARS(nn.Module):
     def forward(self, x_series):
         # x_series: [1, d, n]
         x = self.conv1d_pos(x_series) - self.conv1d_neg(x_series)  # [1, d*m1, n]
-        x = x.T.squeeze(dim=2)                                    # [n, d*m1]
-        x = x.view(-1, self.dims[0], self.dims[1])                # [n, d, m1]
+        # Safe transpose: [1, d*m1, n] -> [n, d*m1]
+        x = x.transpose(1, 2).squeeze(dim=1)                       # [n, d*m1]
+        x = x.view(-1, self.dims[0], self.dims[1])                 # [n, d, m1]
         for fc in self.fc2:
             x = torch.sigmoid(x)
-            x = fc(x)                                              # [n, d, m2]
-        return x.squeeze(dim=2)                                   # [n, d]
+            x = fc(x)                                               # [n, d, m2]
+        return x.squeeze(dim=2)                                    # [n, d]
 
     def h_func(self):
         """DAG constraint: trace(expm(A)) - d."""
