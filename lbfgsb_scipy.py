@@ -9,6 +9,8 @@ class LBFGSBScipy:
     def __init__(self, params):
         self.params = list(params)
         self.bounds = None
+        self._loss = None
+        self._grad = None
 
     def zero_grad(self):
         """Zero out gradients for all parameters."""
@@ -25,44 +27,40 @@ class LBFGSBScipy:
             for _ in range(count):
                 bounds.append((None, None))
 
-        # 1. Convolutional layers: pos and neg
         for conv in [model.conv1d_pos, model.conv1d_neg]:
-            # Instantaneous bounds
             if hasattr(conv, 'instantaneous_bounds'):
                 bounds.extend(conv.instantaneous_bounds)
-            # Lag bounds
             if hasattr(conv, 'lag_bounds_lists'):
                 for var_bounds in conv.lag_bounds_lists:
                     bounds.extend(var_bounds)
-            # Bias terms (unconstrained)
             if conv.bias is not None:
                 add_unbounded(conv.bias.numel())
 
-        # 2. LocallyConnected layers (fc2)
         for fc in model.fc2:
-            # weight
             add_unbounded(fc.weight.numel())
-            # bias (if present)
             if fc.bias is not None:
                 add_unbounded(fc.bias.numel())
 
         self.bounds = bounds
-
         total_params = sum(p.numel() for p in self.params)
         if len(self.bounds) != total_params:
             raise ValueError(f"Bounds length {len(self.bounds)} does not match parameter count {total_params}")
 
     def step(self, closure):
+        """Run one L‑BFGS‑B step. `closure` should compute loss and populate gradients."""
+        self.closure = closure
+
         def scipy_objective(x):
             self._set_params(x)
-            loss = closure()
-            return loss.item()
+            self.zero_grad()
+            loss = self.closure()
+            self._loss = loss.item()
+            self._grad = self._get_grads()
+            return self._loss
 
         def scipy_grad(x):
-            self._set_params(x)
-            closure().backward()
-            grad = self._get_grads()
-            return grad.cpu().numpy().astype(np.float64)
+            # Use the pre‑computed gradient from the last objective call
+            return self._grad
 
         x0 = self._get_params()
         result = scipy.optimize.minimize(
@@ -88,4 +86,4 @@ class LBFGSBScipy:
                 grads.append(torch.zeros_like(p))
             else:
                 grads.append(p.grad.data.clone())
-        return torch.cat([g.view(-1) for g in grads])
+        return torch.cat([g.view(-1) for g in grads]).cpu().numpy().astype(np.float64)
